@@ -13,15 +13,15 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "com.blissless.atsumaru"
+    namespace = "com.blissless.atsumaru.manga"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.blissless.atsumaru"
+        applicationId = "com.blissless.atsumaru.manga"
         minSdk = 26
         targetSdk = 37
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.0.2"
     }
 
     signingConfigs {
