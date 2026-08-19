@@ -13,7 +13,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "com.blissless.atsumaru.manga"
+    namespace = "com.blissless.atsumaru"
     compileSdk = 37
 
     defaultConfig {
