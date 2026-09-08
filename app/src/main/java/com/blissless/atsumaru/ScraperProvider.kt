@@ -133,7 +133,12 @@ class ScraperProvider : ContentProvider() {
                         is Map<*, *> -> obj.put(key.toString(), JSONObject(value as Map<*, *>))
                         is List<*> -> {
                             val arr = JSONArray()
-                            for (item in value) arr.put(item)
+                            for (item in value) {
+                                when (item) {
+                                    is Map<*, *> -> arr.put(JSONObject(item as Map<*, *>))
+                                    else -> arr.put(item)
+                                }
+                            }
                             obj.put(key.toString(), arr)
                         }
                         is JSONArray -> obj.put(key.toString(), value)
