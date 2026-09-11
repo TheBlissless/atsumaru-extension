@@ -91,16 +91,19 @@ object AtsumaruScraper {
         } ?: return mapOf("error" to "No manga found for '$mangaName'.")
 
         // 2. List chapters (metadata only — used to find the requested
-        //    chapter and to report totalChapters in the response).
+        //    chapter and to report totalChapters in the response). Numbers
+        //    are renumbered so continuation blocks (e.g. Dragon Ball Z
+        //    restarting at 1 after Dragon Ball's 194) stay globally unique.
         val chapters = try {
             listChapters(mangaId)
         } catch (e: Exception) {
             return mapOf("error" to "Failed to list chapters: ${e.message}")
         }
-        val totalChapters = chapters.length()
+        val resolved = resolvedChapters(chapters)
+        val totalChapters = resolved.size
 
         // 3. Find the requested chapter and fetch its pages.
-        val match = findChapter(chapters, chapter.trim())
+        val match = findChapter(resolved, chapter.trim())
         if (match == null) {
             return mapOf(
                 "totalChapters" to totalChapters,
@@ -197,17 +200,17 @@ object AtsumaruScraper {
         }
         val totalChapters = chapters.length()
 
-        // 3. Build a clean chapter list with normalized fields.
-        val chapterList = mutableListOf<Map<String, Any?>>()
-        for (i in 0 until chapters.length()) {
-            val ch = chapters.optJSONObject(i) ?: continue
-            chapterList.add(mapOf(
-                "number" to normalizeChapterNumber(ch),
+        // 3. Renumber continuation blocks (see resolvedChapters) and build a
+        //    clean chapter list with normalized, globally-unique numbers.
+        val resolved = resolvedChapters(chapters)
+        val chapterList = resolved.map { ch ->
+            mapOf(
+                "number" to ch.optString("number", "?"),
                 "title" to ch.optString("title", ""),
                 "id" to ch.optString("id", ""),
-                "index" to ch.optInt("index", i),
+                "index" to ch.optInt("index", 0),
                 "pageCount" to ch.optInt("pageCount", 0)
-            ))
+            )
         }
 
         return mapOf(
@@ -223,19 +226,17 @@ object AtsumaruScraper {
      * Find the first chapter whose normalized number matches [requested],
      * falling back to a case-insensitive title match, then numeric equality.
      */
-    private fun findChapter(chapters: JSONArray, requested: String): JSONObject? {
+    private fun findChapter(chapters: List<JSONObject>, requested: String): JSONObject? {
         val requestedNorm = requested.trim()
 
         // Pass 1: exact match on chapter `number`.
-        for (i in 0 until chapters.length()) {
-            val ch = chapters.optJSONObject(i) ?: continue
-            val numStr = normalizeChapterNumber(ch)
+        for (ch in chapters) {
+            val numStr = ch.optString("number", "?")
             if (numStr == requestedNorm) return ch
         }
 
         // Pass 2: case-insensitive title match.
-        for (i in 0 until chapters.length()) {
-            val ch = chapters.optJSONObject(i) ?: continue
+        for (ch in chapters) {
             val title = ch.optString("title", "")
             if (title.equals(requestedNorm, ignoreCase = true)) return ch
         }
@@ -243,8 +244,7 @@ object AtsumaruScraper {
         // Pass 3: numeric equality — "1" matches 1.0, "1.5" matches 1.5.
         val requestedNum = requestedNorm.toDoubleOrNull()
         if (requestedNum != null) {
-            for (i in 0 until chapters.length()) {
-                val ch = chapters.optJSONObject(i) ?: continue
+            for (ch in chapters) {
                 val num = ch.opt("number")
                 if (num is Number && num.toDouble() == requestedNum) return ch
             }
@@ -306,6 +306,55 @@ object AtsumaruScraper {
             }
             else -> raw.toString()
         }
+    }
+
+    /**
+     * Normalize the chapter list so every returned `number` is globally
+     * unique, even when the source aggregates multiple series blocks that
+     * each restart their numbering at 1 (e.g. atsu.moe's "Dragon Ball"
+     * entry lists Dragon Ball 1–194 followed by Dragon Ball Z 1–325).
+     *
+     * Rule: whenever the numeric sequence stops increasing (current number
+     * is strictly below the previous one), a new continuation block begins
+     * and its numbers are offset so the run continues (DBZ 1 → 195, …).
+     * Series whose chapters are a single ascending run are left untouched.
+     */
+    private fun resolvedChapters(raw: JSONArray): List<JSONObject> {
+        val recs = ArrayList<Pair<Double?, JSONObject>>(raw.length())
+        for (i in 0 until raw.length()) {
+            val ch = raw.optJSONObject(i) ?: continue
+            recs.add(normalizeChapterNumber(ch).toDoubleOrNull() to ch)
+        }
+
+        var base = 0.0
+        var blockBase = 0.0
+        var first = true
+        var prevNumber: Double? = null
+        val out = ArrayList<JSONObject>(recs.size)
+        for ((number, ch) in recs) {
+            val restarts = !first && number != null &&
+                    prevNumber != null && number < prevNumber
+            first = false
+            if (restarts) blockBase = base
+
+            val finalNumber = if (number == null) null else blockBase + number
+            if (finalNumber != null && finalNumber > base) base = finalNumber
+            prevNumber = number
+
+            val clone = JSONObject()
+            clone.put("number", finalNumber?.let { formatNumber(it) } ?: "?")
+            clone.put("title", ch.optString("title", ""))
+            clone.put("id", ch.optString("id", ""))
+            clone.put("index", ch.optInt("index", out.size))
+            clone.put("pageCount", ch.optInt("pageCount", 0))
+            out.add(clone)
+        }
+        return out
+    }
+
+    private fun formatNumber(d: Double): String {
+        if (d == d.toLong().toDouble()) return d.toLong().toString()
+        return d.toString().trimEnd('0').trimEnd('.')
     }
 
     // ---------- HTTP ----------
