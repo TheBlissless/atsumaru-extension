@@ -1,6 +1,7 @@
 package com.blissless.atsumaru
 
 import android.content.Context
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -255,17 +256,126 @@ object AtsumaruScraper {
 
     // ---------- API helpers ----------
 
-    /** Search atsu.moe and return the top hit's manga ID (e.g. "CM0wz"). */
+    /**
+     * Search atsu.moe and return the manga ID whose title best matches the
+     * query — NOT necessarily the top hit.
+     *
+     * Typesense tokenizes on spaces, so the exact-title query
+     * "BLUE LOCK -EPISODE NAGI-" is scored as "blue lock" and the 2018 main
+     * series returns as hits[0], with the real Episode Nagi entry missing from
+     * the results entirely. To handle that we:
+     *
+     *   1. search with the raw query and score each hit by title coverage of
+     *      the normalized query tokens (exact normalized-title match wins);
+     *   2. if the best hit still misses query tokens, re-search using ONLY the
+     *      uncovered tokens (e.g. "episode nagi") and prefer a better match;
+     *   3. otherwise fall back to the original behavior (hits[0]).
+     */
     private fun searchManga(query: String): String? {
+        val queryNorm = normalizeTitle(query)
+        val tokens = queryNorm.split(' ').filter { it.isNotBlank() }
+
+        val hits = searchHits(query)
+        hits.forEachIndexed { i, hit ->
+            Log.d(TAG, "searchManga: hit[$i] title='${hit.title}' id=${hit.id}")
+        }
+        if (hits.isEmpty()) {
+            Log.d(TAG, "searchManga: no hits for '$query'")
+            return null
+        }
+
+        val best = pickBest(hits, queryNorm, tokens)
+        Log.d(TAG, "searchManga: best candidate for '$query' -> " +
+                "'${best?.title}' [${best?.id}] tokens=$tokens")
+
+        val covered = best?.let { coveredTokens(it.title, tokens) }.orEmpty()
+        val missing = tokens.filterNot { it in covered }
+        if (missing.isNotEmpty() && missing.size < tokens.size) {
+            val retryQuery = missing.joinToString(" ")
+            Log.d(TAG, "searchManga: best hit misses tokens $missing — retrying with '$retryQuery'")
+            val retry = searchHits(retryQuery)
+            retry.forEachIndexed { i, hit ->
+                Log.d(TAG, "searchManga: retry('$retryQuery') hit[$i] title='${hit.title}' id=${hit.id}")
+            }
+            if (retry.isNotEmpty()) {
+                val best2 = pickBest(retry + hits, queryNorm, tokens)
+                val currentScore = scoreHit(best?.title.orEmpty(), queryNorm, tokens)
+                val retryScore = best2?.let { scoreHit(it.title, queryNorm, tokens) } ?: -1
+                if (best2 != null && retryScore > currentScore) {
+                    Log.d(TAG, "searchManga: switched to '${best2.title}' [${best2.id}] via retry")
+                    return best2.id
+                }
+            }
+        }
+        Log.d(TAG, "searchManga: final choice '${best?.title}' [${best?.id}]")
+        return best?.id ?: hits.first().id
+    }
+
+    private data class SearchHit(val id: String, val title: String)
+
+    /** Runs one search and returns the mangas as (id, title) pairs. */
+    private fun searchHits(query: String): List<SearchHit> {
         val url = "$BASE/api/search/manga?q=${URLEncoder.encode(query, "UTF-8")}" +
                   "&query_by=title&per_page=5"
         val body = httpGet(url)
         val data = JSONObject(body)
-        val hits = data.optJSONArray("hits") ?: return null
-        if (hits.length() == 0) return null
-        val first = hits.optJSONObject(0) ?: return null
-        val doc = first.optJSONObject("document") ?: return null
-        return doc.optString("id").takeIf { it.isNotBlank() }
+        val hits = data.optJSONArray("hits") ?: return emptyList()
+        val out = ArrayList<SearchHit>(hits.length())
+        for (i in 0 until hits.length()) {
+            val doc = hits.optJSONObject(i)?.optJSONObject("document") ?: continue
+            val id = doc.optString("id").takeIf { it.isNotBlank() } ?: continue
+            val title = doc.optString("title", "")
+            out.add(SearchHit(id, title))
+        }
+        return out
+    }
+
+    /**
+     * Pick the candidate with the best title match to the query:
+     * +1000 per query token present in the title, +10000 for a normalized
+     * prefix/exact-size relationship, +1M for a full normalized-title match.
+     * Ties keep the earlier hit.
+     */
+    private fun pickBest(hits: List<SearchHit>, queryNorm: String, tokens: List<String>): SearchHit? {
+        var best: SearchHit? = null
+        var bestScore = -1
+        for (hit in hits) {
+            val s = scoreHit(hit.title, queryNorm, tokens)
+            if (s > bestScore) {
+                bestScore = s
+                best = hit
+            }
+        }
+        return best
+    }
+
+    private fun scoreHit(title: String, queryNorm: String, tokens: List<String>): Int {
+        val t = normalizeTitle(title)
+        var score = tokens.count { t.contains(it) } * 1000
+        if (t.isNotEmpty() && (t.startsWith(queryNorm) || queryNorm.startsWith(t))) score += 10_000
+        if (t == queryNorm) score += 1_000_000
+        return score
+    }
+
+    private fun coveredTokens(title: String, tokens: List<String>): Set<String> {
+        val t = normalizeTitle(title)
+        return tokens.filter { t.contains(it) }.toSet()
+    }
+
+    /** Lowercases and keeps only letters/digits as space-separated words. */
+    private fun normalizeTitle(s: String): String {
+        val sb = StringBuilder()
+        var prevSpace = false
+        for (c in s.lowercase()) {
+            if (c.isLetterOrDigit()) {
+                sb.append(c)
+                prevSpace = false
+            } else if (!prevSpace && sb.isNotEmpty()) {
+                sb.append(' ')
+                prevSpace = true
+            }
+        }
+        return sb.toString().trim()
     }
 
     /** Returns the `chapters` array from /api/manga/info. */
@@ -319,6 +429,15 @@ object AtsumaruScraper {
      * and its numbers are offset so the run continues (DBZ 1 → 195, …).
      * Series whose chapters are a single ascending run are left untouched.
      */
+    /**
+     * A continuation block is only recognized when the numbers hike back down
+     * near 1 (e.g. atsu.moe's "Dragon Ball" lists DB 1–194 then DBZ starting
+     * at 1 again). Out-of-order entries like decimal specials ("22.5", "25.2")
+     * drop the number by a small amount but are NOT restarts — renumbering
+     * them would corrupt the whole series tail (e.g. 25.2 -> 52.2).
+     */
+    private val RESTART_BLOCK_START_MAX = 10.0
+
     private fun resolvedChapters(raw: JSONArray): List<JSONObject> {
         val recs = ArrayList<Pair<Double?, JSONObject>>(raw.length())
         for (i in 0 until raw.length()) {
@@ -333,7 +452,12 @@ object AtsumaruScraper {
         val out = ArrayList<JSONObject>(recs.size)
         for ((number, ch) in recs) {
             val restarts = !first && number != null &&
-                    prevNumber != null && number < prevNumber
+                    prevNumber != null && number < prevNumber &&
+                    number <= RESTART_BLOCK_START_MAX
+            if (restarts) {
+                Log.d(TAG, "resolvedChapters: continuation block at " +
+                        "number=$number (prev=$prevNumber, base=$base) — offsetting")
+            }
             first = false
             if (restarts) blockBase = base
 
