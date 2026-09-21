@@ -56,8 +56,9 @@ only) or the image URLs for a single user-specified chapter.
 
    The response's `readChapter.pages` array contains objects with an `image`
    field holding relative URLs like `/static/pages/CM0wz/E5PXRSUC/0.webp`. The
-   extension prefixes these with the base URL to produce absolute
-   `https://atsu.moe/...` URLs.
+   extension prefixes these with the CDN host (`cdn.atsu.moe`, not `atsu.moe` —
+   the origin returns 410 Gone for page files) to produce absolute
+   `https://cdn.atsu.moe/...` URLs.
 
    Chapter keys are normalized chapter numbers (`"1"` instead of `"1.0"`).
 
@@ -120,8 +121,8 @@ the `number` field returned by the `chapters` path.
     "title": "Prologue 1",
     "group": "",
     "images": [
-      "https://atsu.moe/static/pages/CM0wz/E5PXRSUC/0.webp",
-      "https://atsu.moe/static/pages/CM0wz/E5PXRSUC/1.webp"
+      "https://cdn.atsu.moe/static/pages/CM0wz/E5PXRSUC/0.webp",
+      "https://cdn.atsu.moe/static/pages/CM0wz/E5PXRSUC/1.webp"
     ]
   }
 }
@@ -189,8 +190,8 @@ and images are only fetched when the user actually opens a chapter.
   number first, then title, then numeric equality.
 - When the requested chapter isn't found, the error response still includes
   `totalChapters` so the UI can tell the user the valid range.
-- Chapter-image URLs are returned as **absolute** `https://atsu.moe/...`
-  URLs so the main app can load them directly.
+- Chapter-image URLs are returned as **absolute**
+  `https://cdn.atsu.moe/...` URLs so the main app can load them directly.
 - The `group` field is always empty (`""`) — atsu.moe's chapter object
   doesn't expose a scanlation group name, only a `scanId` (an internal ID).
 

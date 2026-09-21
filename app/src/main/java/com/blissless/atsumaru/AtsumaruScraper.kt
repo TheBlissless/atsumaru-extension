@@ -36,7 +36,7 @@ import java.net.URLEncoder
  *         "number": "1",
  *         "title": "Prologue 1",
  *         "group": "Alpha",
- *         "images": ["https://atsu.moe/static/pages/.../0.webp", ...]
+ *         "images": ["https://cdn.atsu.moe/static/pages/.../0.webp", ...]
  *       } }
  *
  *   Error (no manga name):
@@ -51,6 +51,11 @@ import java.net.URLEncoder
 object AtsumaruScraper {
 
     private const val BASE = "https://atsu.moe"
+    // Page images live on the CDN host, not the API host. The API returns
+    // relative paths like /static/pages/..., and hitting them on atsu.moe
+    // itself returns HTTP 410 (the origin purged them there). cdn.atsu.moe
+    // is the host the site's own CSP connects to for images.
+    private const val IMAGE_BASE = "https://cdn.atsu.moe"
     private const val TAG = "Atsumaru"
 
     private const val UA =
@@ -400,7 +405,9 @@ object AtsumaruScraper {
             val rel = page.optString("image", "")
             if (rel.isBlank()) continue
             // API returns relative URLs like "/static/pages/CM0wz/E5PXRSUC/0.webp".
-            out.add(if (rel.startsWith("http")) rel else "$BASE$rel")
+            // Full pages are only served from the CDN host — prefix with
+            // IMAGE_BASE (atsu.moe itself returns 410 Gone for these).
+            out.add(if (rel.startsWith("http")) rel else "$IMAGE_BASE$rel")
         }
         return out
     }
